@@ -1,0 +1,48 @@
+services:
+  harness:
+    build: .
+    image: byoa-harness-platform:local
+    ports:
+      - "8000:8000"
+    environment:
+      HARNESS_ENVIRONMENT: local
+      HARNESS_DATABASE_URL: sqlite+aiosqlite:////app/data/harness.db
+      HARNESS_MAX_CONCURRENT_SESSIONS_TOTAL: "50"
+      HARNESS_MAX_CONCURRENT_SESSIONS_PER_AGENT: "3"
+      HARNESS_APPROVAL_DEFAULT_TIMEOUT_SECONDS: "600"
+    volumes:
+      - harness-data:/app/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # Sandbox hardening for the CONTAINER ITSELF (defense-in-depth around
+    # ProcessRuntime's subprocess-level limits): drop Linux capabilities and
+    # cap the number of processes the whole container (harness + every
+    # spawned agent subprocess) can create.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+
+    # --- Optional: enable ContainerRuntime (real per-agent Docker isolation) ---
+    # ContainerRuntime lets code agents run in their OWN separate, fully
+    # isolated containers (network:none, read-only rootfs, dropped caps --
+    # see harness/runtime/container_runtime.py) instead of as subprocesses
+    # inside THIS container. It requires the harness to reach a Docker
+    # daemon, which in the simplest local setup means mounting the host's
+    # Docker socket below. Be aware this grants the harness container
+    # effective root-equivalent control over the host's Docker daemon --
+    # acceptable for local development, NOT a hardened production posture.
+    # A production deployment should instead point DOCKER_HOST at a
+    # dedicated, access-controlled Docker (or Kubernetes) API rather than
+    # mounting the host socket directly.
+    #
+    # volumes:
+    #   - harness-data:/app/data
+    #   - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  harness-data:
