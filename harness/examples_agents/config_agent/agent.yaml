@@ -1,0 +1,23 @@
+# Example declarative-shape agent ("workspace-archiver").
+#
+# This is a data-only agent definition: no code is executed by the harness
+# to run it. The DeclarativeRuntime interpreter walks `steps` in order,
+# substituting {{input.*}} placeholders from the task input, and sends each
+# one through the exact same policy-engine + gateway path a code agent's
+# action_request goes through.
+#
+# Task input shape: {"source_file": "notes.txt", "archive_note": "..."}
+name: workspace-archiver
+steps:
+  - action: file.read
+    resource: "/workspace/{{input.source_file}}"
+    parameters: {}
+
+  - action: file.write
+    resource: "/workspace/archive/{{input.source_file}}.bak"
+    parameters:
+      content: "{{input.archive_note}}"
+
+  - action: spend.charge
+    parameters:
+      amount_usd: 1

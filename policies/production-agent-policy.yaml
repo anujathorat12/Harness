@@ -1,0 +1,37 @@
+policy:
+  name: production-agent-policy
+  version: 1
+  default_effect: deny   # secure default: anything not explicitly matched is denied
+
+rules:
+  - id: allow-workspace-read
+    action: file.read
+    resource: "/workspace/**"
+    effect: allow
+    description: Agents may read anything inside their own session workspace.
+
+  - id: allow-workspace-write
+    action: file.write
+    resource: "/workspace/archive/**"
+    effect: allow
+    description: Agents may write only into the archive/ subdirectory.
+
+  - id: deny-sensitive-files
+    action: file.read
+    resource: "/etc/**"
+    effect: deny
+    description: Host configuration is never readable, regardless of any broader allow rule below.
+
+  - id: approve-email
+    action: email.send
+    effect: require_approval
+    description: Outbound email always needs a human in the loop.
+
+  - id: budgeted-spend
+    action: spend.charge
+    effect: allow
+    budget:
+      key: spend_usd
+      limit: 5
+      amount_field: parameters.amount_usd
+    description: Small simulated spend actions are allowed up to a $5/session budget, then denied.
