@@ -87,6 +87,14 @@ class AttachPolicyRequest(BaseModel):
     scope_id: str
 
 
+class PolicyAttachmentOut(BaseModel):
+    policy_id: str
+    policy_name: str
+    version: int
+    scope_type: str
+    scope_id: str
+
+
 # ---------- Tasks / Sessions ----------
 
 class SubmitTaskRequest(BaseModel):
@@ -100,9 +108,27 @@ class SubmitTaskRequest(BaseModel):
     )
 
 
+class SubmitTaskToAgentRequest(BaseModel):
+    """Same as SubmitTaskRequest, minus agent_id -- used by the agent-scoped
+    POST /agents/{agent_id}/tasks endpoint, where the agent is already
+    identified by the URL path, not the body. This is the primary contract
+    an external application integrates against: identify an onboarded agent
+    by ID, then invoke it -- see docs/EXTERNAL_INTEGRATION.md."""
+
+    agent_version_id: str | None = Field(default=None, description="Defaults to the agent's latest active version")
+    input: dict[str, Any] = Field(default_factory=dict)
+    workspace_files: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional seed files written into the session's isolated workspace before the agent starts, "
+        "keyed by path relative to /workspace (e.g. {'report.txt': 'contents...'}).",
+    )
+
+
 class SubmitTaskResponse(BaseModel):
     session_id: str
     task_id: str
+    agent_id: str
+    status: str
 
 
 class TaskOut(BaseModel):
@@ -112,6 +138,7 @@ class TaskOut(BaseModel):
     input: dict[str, Any]
     result: dict[str, Any] | None
     error: str | None
+    created_by: str | None = None
     created_at: datetime
     started_at: datetime | None
     ended_at: datetime | None
@@ -137,7 +164,12 @@ class SessionOut(BaseModel):
 
 class ResolveApprovalRequest(BaseModel):
     approve: bool
-    approver: str
+    # Optional: when omitted, the resolving endpoint uses the authenticated
+    # caller's principal label instead. Kept as an optional override (rather
+    # than removed) so a Swagger/curl caller passing a custom API key can
+    # still set a more descriptive name; it is never trusted in place of the
+    # X-API-Key-derived role check.
+    approver: str | None = None
     reason: str | None = None
 
 
@@ -201,3 +233,35 @@ class AuditEventOut(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
     detail: str | None = None
+
+
+# ---------- Auth ----------
+
+class PrincipalOut(BaseModel):
+    role: str
+    label: str
+
+
+# ---------- Dashboard ----------
+
+class DashboardSummary(BaseModel):
+    agents_total: int
+    sessions_running: int
+    sessions_completed: int
+    sessions_failed: int
+    approvals_pending: int
+    recent_actions: list[ActionOut]
+    recent_audit_events: list[AuditEventOut]
+
+
+# ---------- System ----------
+
+class SystemStatus(BaseModel):
+    environment: str
+    api_version: str
+    database: str
+    sessions_running_now: int
+    max_concurrent_sessions_total: int
+    max_concurrent_sessions_per_agent: int
+    container_runtime_available: bool
+    container_runtime_note: str

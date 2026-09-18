@@ -143,6 +143,11 @@ class Task(Base):
     # pending|running|paused_for_approval|succeeded|failed|cancelled
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The authenticated principal's label at submission time (e.g.
+    # "client-key"), used for best-effort CLIENT-role row scoping: a CLIENT
+    # can only list/read tasks whose created_by matches their own label. Not
+    # a full multi-tenancy model -- see SECURITY.md.
+    created_by: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -37,16 +37,22 @@ _running_handles: dict[str, object] = {}  # session_id -> AgentHandle, for cance
 
 
 async def submit_task(
-    agent_id: str, agent_version_id: str, task_input: dict, workspace_files: dict[str, str] | None = None
+    agent_id: str,
+    agent_version_id: str,
+    task_input: dict,
+    workspace_files: dict[str, str] | None = None,
+    created_by: str | None = None,
 ) -> tuple[str, str]:
     """Creates the Session + Task rows synchronously (so the caller gets IDs
     back immediately) and schedules execution in the background. Returns
-    (session_id, task_id)."""
+    (session_id, task_id). `created_by` is the authenticated caller's
+    principal label (see harness/core/security.py), used only for CLIENT-role
+    row-level scoping on read -- it plays no role in policy enforcement."""
     async with SessionLocal() as db:
         session_row = models.Session(agent_id=agent_id, agent_version_id=agent_version_id, status="pending")
         db.add(session_row)
         await db.flush()
-        task_row = models.Task(session_id=session_row.id, input=task_input, status="pending")
+        task_row = models.Task(session_id=session_row.id, input=task_input, status="pending", created_by=created_by)
         db.add(task_row)
         await db.flush()
         await log_event(
