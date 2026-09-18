@@ -221,7 +221,7 @@ class ProcessRuntime(Runtime):
         os.makedirs(workdir, exist_ok=True, mode=0o700)
 
         env = {
-            "PATH": "/usr/bin:/bin",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
             "HARNESS_SANDBOX": "1",
             "HOME": workdir,
         }
