@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
@@ -33,6 +34,11 @@ import httpx
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The API now requires an X-API-Key header (see harness/core/security.py).
+# This demo runs everything as ADMIN so it can exercise every endpoint in one
+# script; override via env var if you've changed the dev-default key.
+ADMIN_API_KEY = os.environ.get("HARNESS_API_KEY_ADMIN", "dev-admin-key-***CHANGE-ME***")
 
 
 def banner(title: str) -> None:
@@ -58,7 +64,7 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://localhost:8000")
     args = parser.parse_args()
 
-    client = httpx.Client(base_url=args.base_url, timeout=30)
+    client = httpx.Client(base_url=args.base_url, timeout=30, headers={"X-API-Key": ADMIN_API_KEY})
 
     try:
         client.get("/health").raise_for_status()
