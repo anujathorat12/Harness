@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY harness ./harness
 COPY policies ./policies
+COPY demo ./demo
 
 RUN mkdir -p /app/data /tmp/harness-sandboxes && chown -R harness:harness /app/data /tmp/harness-sandboxes
 

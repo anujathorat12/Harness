@@ -10,6 +10,14 @@ services:
       HARNESS_MAX_CONCURRENT_SESSIONS_TOTAL: "50"
       HARNESS_MAX_CONCURRENT_SESSIONS_PER_AGENT: "3"
       HARNESS_APPROVAL_DEFAULT_TIMEOUT_SECONDS: "600"
+      # Dev-only default keys (see harness/core/config.py) -- override these
+      # with real secrets before running with HARNESS_ENVIRONMENT anything
+      # other than "local". Never commit real values here.
+      HARNESS_API_KEY_ADMIN: dev-admin-key-***CHANGE-ME***
+      HARNESS_API_KEY_OPERATOR: dev-operator-key-***CHANGE-ME***
+      HARNESS_API_KEY_AUDITOR: dev-auditor-key-***CHANGE-ME***
+      HARNESS_API_KEY_CLIENT: dev-client-key-***CHANGE-ME***
+      HARNESS_CORS_ALLOW_ORIGINS_CSV: http://localhost:5173,http://127.0.0.1:5173
     volumes:
       - harness-data:/app/data
     healthcheck:
@@ -43,6 +51,19 @@ services:
     # volumes:
     #   - harness-data:/app/data
     #   - /var/run/docker.sock:/var/run/docker.sock
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the static bundle at build time. If you change the
+        # harness service's exposed port/host, rebuild the frontend image
+        # with a matching --build-arg VITE_API_BASE_URL.
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      - harness
 
 volumes:
   harness-data:
