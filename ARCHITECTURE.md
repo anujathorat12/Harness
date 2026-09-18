@@ -1,5 +1,42 @@
 # ARCHITECTURE.md
 
+## One-page summary
+
+**What it is:** a control plane that hosts third-party ("bring your own")
+agents, runs each one in isolation, and puts a policy engine between every
+single action an agent attempts and the real world — not just a yes/no at
+startup.
+
+```
+External App / Admin UI / Swagger
+  -> Harness REST API (X-API-Key, role check)
+  -> Agent Registry -> Task/Session Manager -> Sandboxed Runtime
+  -> agent asks: "I want to do X" (never does it directly)
+  -> Policy Enforcement Point -> Policy Engine -> ALLOW / DENY / REQUIRE_APPROVAL
+  -> (approval path: pause -> human decides -> resume)
+  -> Tool executes (only now) -> Result + Audit -> back to caller
+```
+
+**Key design decisions and the trade-offs behind them:**
+
+| Decision | Why | Trade-off accepted |
+|---|---|---|
+| One single enforcement chokepoint (the Tool Gateway) — no other code path can call a real tool | An agent that bypasses policy anywhere is a total security failure; centralizing removes that risk structurally, not by convention | Every new tool must be wired through one place — slightly less flexible, deliberately |
+| Two genuinely different agent "shapes": a real sandboxed process, and a pure-data declarative interpreter with **no code execution at all** | Proves the platform governs by *behavior* (the action-request protocol), not by trusting what kind of agent it is | Extra runtime abstraction layer to maintain two implementations |
+| Fail-closed everywhere — unknown action, missing policy, malformed rule, or an internal error all resolve to `deny`, never `allow` | A silent gap that defaults to "allow" is far worse than a strict system rejecting something it should have allowed | More setup friction — every agent needs an explicit policy attached before it can do anything |
+| Static per-role API key (ADMIN/OPERATOR/AUDITOR/CLIENT), not full enterprise IAM | Matches the actual scope needed here; every check is still enforced server-side, never trusted to the UI | Not a real identity provider — no token expiry, no per-user accounts (documented, not hidden) |
+| SQLite by default, Postgres-swappable via one env var | Zero setup — `docker compose up` just works, nothing external to install | SQLite allows one writer at a time; mitigated with a busy-timeout retry, a non-issue at this scale |
+| `ProcessRuntime` (dependency-free, tested here) vs `ContainerRuntime` (real filesystem/network isolation, written but not exercised without a live Docker daemon in this build) | Keeps the test suite runnable anywhere while still providing a real-isolation path for production | `ProcessRuntime` alone does **not** stop an agent that bypasses its SDK and makes raw OS calls — stated plainly, not glossed over (see §6) |
+| Durable approval state (a database row) plus a best-effort in-memory wake-up | Correctness never depends on the harness process staying alive — only how fast a human's decision is noticed does | A paused approval doesn't auto-resume its live sandbox after a harness restart (see §12) |
+| No Kubernetes, no message queue, no microservices split | Explicitly out of scope for this size of system — Docker Compose is a complete, honest answer here | Won't horizontally scale as-is; that's a real next step, not an oversight |
+
+The rest of this document is the full technical deep-dive — trust
+boundaries, data model, every subsystem's guarantees, and the complete
+"known limitations" list — for anyone who wants to go past the summary
+above.
+
+---
+
 ## 1. What this is
 
 A microservice that hosts third-party ("bring your own") agents, runs each
