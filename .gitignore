@@ -11,3 +11,9 @@ data/
 .DS_Store
 harness-sandboxes/
 /tmp/
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/npm-debug.log*
