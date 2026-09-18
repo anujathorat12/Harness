@@ -6,12 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from harness.api.v1 import schemas
 from harness.core.database import get_db
+from harness.core.security import ADMIN, AUDITOR, OPERATOR, require_role
 from harness.domain import models
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
-@router.get("/events", response_model=list[schemas.AuditEventOut])
+@router.get("/events", response_model=list[schemas.AuditEventOut], dependencies=[Depends(require_role(ADMIN, OPERATOR, AUDITOR))])
 async def query_audit(
     agent_id: str | None = None,
     session_id: str | None = None,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,13 +10,14 @@ from sqlalchemy.orm import selectinload
 from harness.api.v1 import schemas
 from harness.audit.audit_logger import log_event
 from harness.core.database import get_db
+from harness.core.security import ADMIN, OPERATOR, require_role
 from harness.domain import models
 from harness.policy_engine.loader import PolicyValidationError, dump_canonical_json, parse_policy_source
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
 
-@router.post("", response_model=schemas.PolicyOut, status_code=201)
+@router.post("", response_model=schemas.PolicyOut, status_code=201, dependencies=[Depends(require_role(ADMIN))])
 async def create_policy(body: schemas.CreatePolicyRequest, db: AsyncSession = Depends(get_db)):
     """Creates a policy and its first immutable version. The submitted
     source is validated against the canonical schema BEFORE anything is
@@ -46,7 +49,12 @@ async def create_policy(body: schemas.CreatePolicyRequest, db: AsyncSession = De
     return policy
 
 
-@router.post("/{policy_id}/versions", response_model=schemas.PolicyVersionOut, status_code=201)
+@router.post(
+    "/{policy_id}/versions",
+    response_model=schemas.PolicyVersionOut,
+    status_code=201,
+    dependencies=[Depends(require_role(ADMIN))],
+)
 async def add_policy_version(policy_id: str, body: schemas.AddPolicyVersionRequest, db: AsyncSession = Depends(get_db)):
     policy = await db.get(models.Policy, policy_id)
     if policy is None:
@@ -76,13 +84,13 @@ async def add_policy_version(policy_id: str, body: schemas.AddPolicyVersionReque
     return version
 
 
-@router.get("", response_model=list[schemas.PolicyOut])
+@router.get("", response_model=list[schemas.PolicyOut], dependencies=[Depends(require_role(ADMIN, OPERATOR))])
 async def list_policies(db: AsyncSession = Depends(get_db)):
     stmt = select(models.Policy).options(selectinload(models.Policy.versions))
     return (await db.execute(stmt)).scalars().all()
 
 
-@router.get("/{policy_id}", response_model=schemas.PolicyOut)
+@router.get("/{policy_id}", response_model=schemas.PolicyOut, dependencies=[Depends(require_role(ADMIN, OPERATOR))])
 async def get_policy(policy_id: str, db: AsyncSession = Depends(get_db)):
     stmt = select(models.Policy).where(models.Policy.id == policy_id).options(selectinload(models.Policy.versions))
     policy = (await db.execute(stmt)).scalars().first()
@@ -91,7 +99,40 @@ async def get_policy(policy_id: str, db: AsyncSession = Depends(get_db)):
     return policy
 
 
-@router.post("/{policy_id}/versions/{version}/attach", status_code=201)
+@router.get(
+    "/attachments/lookup",
+    response_model=schemas.PolicyAttachmentOut | None,
+    dependencies=[Depends(require_role(ADMIN, OPERATOR))],
+)
+async def lookup_attachment(
+    scope_type: Literal["agent", "session"], scope_id: str, db: AsyncSession = Depends(get_db)
+):
+    """Read-only convenience for the admin UI ('which policy governs this
+    agent/session right now?'). Purely a projection of PolicyAttachment rows
+    -- it does not participate in policy resolution at enforcement time,
+    which stays entirely inside harness/policy_engine/resolver.py."""
+    stmt = (
+        select(models.PolicyAttachment)
+        .where(models.PolicyAttachment.scope_type == scope_type, models.PolicyAttachment.scope_id == scope_id)
+        .order_by(models.PolicyAttachment.created_at.desc())
+    )
+    attachment = (await db.execute(stmt)).scalars().first()
+    if attachment is None:
+        return None
+    pv = await db.get(models.PolicyVersion, attachment.policy_version_id)
+    if pv is None:
+        return None
+    policy = await db.get(models.Policy, pv.policy_id)
+    return schemas.PolicyAttachmentOut(
+        policy_id=pv.policy_id,
+        policy_name=policy.name if policy else "",
+        version=pv.version,
+        scope_type=scope_type,
+        scope_id=scope_id,
+    )
+
+
+@router.post("/{policy_id}/versions/{version}/attach", status_code=201, dependencies=[Depends(require_role(ADMIN))])
 async def attach_policy(policy_id: str, version: int, body: schemas.AttachPolicyRequest, db: AsyncSession = Depends(get_db)):
     """Attaches a specific, immutable policy VERSION to an agent (default
     for all its sessions) or a single session (overrides the agent default

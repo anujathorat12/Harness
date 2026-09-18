@@ -8,12 +8,13 @@ from sqlalchemy.orm import selectinload
 from harness.api.v1 import schemas
 from harness.audit.audit_logger import log_event
 from harness.core.database import get_db
+from harness.core.security import ADMIN, OPERATOR, require_role
 from harness.domain import models
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
-@router.post("", response_model=schemas.AgentOut, status_code=201)
+@router.post("", response_model=schemas.AgentOut, status_code=201, dependencies=[Depends(require_role(ADMIN))])
 async def register_agent(body: schemas.RegisterAgentRequest, db: AsyncSession = Depends(get_db)):
     """Register a new agent identity and its first runnable version. This is
     the BYOA entry point: any team can call this with either agent 'shape'
@@ -45,7 +46,12 @@ async def register_agent(body: schemas.RegisterAgentRequest, db: AsyncSession = 
     return agent
 
 
-@router.post("/{agent_id}/versions", response_model=schemas.AgentVersionOut, status_code=201)
+@router.post(
+    "/{agent_id}/versions",
+    response_model=schemas.AgentVersionOut,
+    status_code=201,
+    dependencies=[Depends(require_role(ADMIN))],
+)
 async def add_agent_version(agent_id: str, body: schemas.AddAgentVersionRequest, db: AsyncSession = Depends(get_db)):
     agent = await db.get(models.Agent, agent_id)
     if agent is None:
@@ -72,13 +78,13 @@ async def add_agent_version(agent_id: str, body: schemas.AddAgentVersionRequest,
     return version
 
 
-@router.get("", response_model=list[schemas.AgentOut])
+@router.get("", response_model=list[schemas.AgentOut], dependencies=[Depends(require_role(ADMIN, OPERATOR))])
 async def list_agents(db: AsyncSession = Depends(get_db)):
     stmt = select(models.Agent).options(selectinload(models.Agent.versions))
     return (await db.execute(stmt)).scalars().all()
 
 
-@router.get("/{agent_id}", response_model=schemas.AgentOut)
+@router.get("/{agent_id}", response_model=schemas.AgentOut, dependencies=[Depends(require_role(ADMIN, OPERATOR))])
 async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     stmt = select(models.Agent).where(models.Agent.id == agent_id).options(selectinload(models.Agent.versions))
     agent = (await db.execute(stmt)).scalars().first()
