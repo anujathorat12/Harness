@@ -10,16 +10,95 @@ around:
 > **An untrusted agent must not be able to bypass the harness's policy
 > enforcement boundary to perform a governed action.**
 
-Everything below explains how that boundary is drawn and what does (and does
-not) hold it.
+A second claim, equally load-bearing, governs how anything *reaches* an
+agent in the first place:
+
+> **An external application never talks to an onboarded agent directly.
+> The Harness is the only thing that can start, drive, or communicate with
+> an agent's sandbox — every external caller (a script, another service,
+> this platform's own Admin UI, or a human using Swagger) goes through the
+> Harness's REST API and nothing else.**
+
+Everything below explains how both boundaries are drawn and what does (and
+does not) hold them.
+
+## 1b. External application → onboarded agent, the whole path
+
+This is the concrete answer to "how does an outside application invoke an
+agent onboarded into this platform":
+
+```
+External Application (curl / another service / Admin UI / Swagger — all
+identical as far as the backend is concerned)
+   |
+   |  1. ONBOARD (once, by whoever registers the agent):
+   |     POST /api/v1/agents  {name, owner, shape, initial_version}
+   |     -> agent_id  (harness/api/v1/agents.py::register_agent)
+   |
+   |  2. DISCOVER:
+   |     GET /api/v1/agents            -- list what's onboarded
+   |     GET /api/v1/agents/{agent_id} -- inspect one
+   |
+   |  3. INVOKE  (the contract an external app actually integrates against):
+   v
+POST /api/v1/agents/{agent_id}/tasks   {input, workspace_files?}
+   |  (harness/api/v1/tasks.py::create_task_for_agent)
+   |  X-API-Key -> role check (ADMIN/OPERATOR/CLIENT can invoke) -- see §3b
+   v
+{"session_id", "task_id", "agent_id", "status": "pending"}   <-- 202, immediately
+   |
+   |  4. POLL (agent-agnostic, works identically for the task from step 3
+   |     regardless of which agent or shape produced it):
+   |     GET /api/v1/tasks/{task_id}
+   |
+   |  5. IF status shows an action waiting on a human (see §8):
+   |     GET /api/v1/approvals?status=pending
+   |     POST /api/v1/approvals/{approval_id}/resolve  {approve: true|false}
+   |     -- an ADMIN/OPERATOR call; the external application that submitted
+   |        the task is never the same channel that resolves the approval,
+   |        and the agent never receives the approval directly from
+   |        anyone but the Harness resuming its own runtime.
+   |
+   |  6. RESULT:
+   |     GET /api/v1/tasks/{task_id}   -- .result once status is "succeeded"
+   |
+   |  7. RECONSTRUCT what happened, independently of what the caller
+   |     itself logged:
+   |     GET /api/v1/audit/events?task_id=...
+   v
+External Application
+```
+
+The external application at no point needs, sees, or references: a Python
+class, an agent's `AgentVersion.spec` (entrypoint argv, container image,
+declarative steps), a process ID, a container ID, or any tool
+implementation. `agent_id` is the only handle it ever holds, and that ID
+resolves entirely on the Harness side (`harness/api/v1/tasks.py`'s
+`_submit_task_for_agent`, the single function both `POST /tasks` and
+`POST /agents/{agent_id}/tasks` call into) into "look up this Agent row,
+pick a version, start a Runtime for it" — there is no `if agent_id ==
+"..."` branch anywhere in that path, or anywhere downstream of it in the
+orchestrator, gateway, or policy engine. Two different registered agents of
+the same shape are indistinguishable to every layer below the Agent
+Registry; two different *shapes* are indistinguishable to every layer below
+the Runtime interface (§3). Worked curl examples:
+[docs/EXTERNAL_INTEGRATION.md](docs/EXTERNAL_INTEGRATION.md). Tests proving
+this exact path: `tests/integration/test_external_agent_api.py`.
+
+`POST /tasks` (agent_id in the request body, not the URL) still exists
+alongside `POST /agents/{agent_id}/tasks` — same underlying function, same
+guarantees, kept for backward compatibility and because the Admin UI already
+used it. New external integrations should prefer the agent-scoped path; it
+is the one documented as the platform's public contract.
 
 ## 2. End-to-end flow
 
 ```
-Client
-  |  POST /api/v1/tasks {agent_id, input}
+External Application / Admin UI / Swagger
+  |  POST /api/v1/agents/{agent_id}/tasks {input}   (or POST /api/v1/tasks {agent_id, input})
   v
 REST API (harness/api/v1/tasks.py)
+  |  X-API-Key -> role check (§3b) -- unauthenticated/wrong-role stops here, before any row is touched
   |  creates Session + Task rows, schedules background execution
   v
 Orchestrator (harness/orchestrator/task_manager.py)
@@ -38,9 +117,12 @@ Tool Gateway  (harness/gateway/tool_gateway.py)  <-- THE enforcement point
   DENY  ---------------> feed denial back to runtime (nothing executes)
   REQUIRE_APPROVAL -----> create Approval row -> WAIT (session shows "paused")
                           |
-                          v  human calls POST /approvals/{id}/resolve
+                          v  ADMIN/OPERATOR calls POST /approvals/{id}/resolve
                           approved -> execute tool -> audit
                           denied/timed_out -> deny -> audit
+  v
+GET /api/v1/tasks/{task_id}  -- external application polls this for status/result,
+                                 identical regardless of which agent produced it
 ```
 
 Every branch ends by returning to the runtime, which resumes the agent (or
@@ -62,6 +144,14 @@ inert data):
   `action_request` an agent sends (action_type/resource/parameters are never
   trusted to mean what the agent claims — the gateway independently
   re-validates paths, see §5).
+- **The Admin/Operator UI (`frontend/`)**, in the same sense any REST client
+  is untrusted: it is just another caller of the public API, carries no
+  elevated access of its own, and enforces nothing. It calls
+  `GET /api/v1/auth/me` to learn a role purely to decide what to *render* —
+  every actual permission check happens again, authoritatively, on the
+  backend for that exact request. A compromised or modified frontend build
+  could send any request an attacker likes; the worst it could do is what
+  the attacker's own API key already permits.
 
 The boundary is drawn at the **Runtime interface**
 (`harness/runtime/base.py`): a `Runtime`/`AgentHandle` can only *emit*
@@ -71,6 +161,35 @@ isn't just a convention — it's structural: `harness/gateway/tools.py`'s
 `TOOLS` dict is imported in exactly one place
 (`harness/gateway/tool_gateway.py`), and nothing in `runtime/` or
 `orchestrator/` imports it.
+
+## 3b. Authentication / authorization (RBAC)
+
+`harness/core/security.py`. A caller presents `X-API-Key`, which
+`get_current_principal()` maps to one of four fixed roles (`ADMIN`,
+`OPERATOR`, `AUDITOR`, `CLIENT`) — no match is `401`, wrong role for the
+route is `403`. This is applied per-route with
+`Depends(require_role(...))`, the same dependency-injection pattern the
+codebase already used for `Depends(get_db)`, not a separate parallel
+mechanism bolted on afterward.
+
+Two properties worth calling out:
+- **Server-side only.** Every privileged route carries its own
+  `require_role(...)` dependency; nothing about authorization lives in, or
+  depends on, the frontend. `tests/integration/test_authz.py` asserts this
+  directly (e.g. a `CLIENT` key gets `403` registering an agent regardless
+  of what any UI would have shown).
+- **CLIENT row-scoping, not multi-tenancy.** `Task.created_by` records the
+  authenticated principal's label at submission time; `CLIENT`-role reads of
+  `/tasks` and `/sessions` filter to rows they created (a non-owned task ID
+  returns `404`, not `403`, so existence itself isn't leaked). This is
+  intentionally minimal — see README § Known limitations — not a general
+  tenancy/ownership model extended to agents or policies.
+
+This is a deliberately small, auditable scheme (see SECURITY.md), not an
+enterprise IAM system — no user table, no password hashing, no token
+issuance or expiry. Swapping in a real identity provider later only touches
+`get_current_principal()`; every route's `require_role(...)` call is already
+written against an abstract `Principal`, not against API keys specifically.
 
 ## 4. Why an agent can't skip the policy engine
 
@@ -239,6 +358,22 @@ children behind. Each session gets its own real filesystem directory under
 `HARNESS_RUNTIME_WORKDIR_ROOT`, verified isolated in
 `test_multiple_agents_run_concurrently_and_are_isolated`.
 
+**SQLite and concurrent writers.** SQLite allows exactly one writer at a
+time. With `NullPool` (a fresh real connection per checkout — required so
+connections don't outlive the event loop that opened them, see
+`core/database.py`) and multiple sessions writing concurrently, two
+connections briefly wanting to write at the same moment is normal, not a
+bug. `core/database.py` sets `PRAGMA busy_timeout` on every new connection
+so a writer retries for up to 15s instead of sqlite3's default of failing
+immediately with `database is locked`; a real request returns in
+milliseconds either way; this only ever matters on the rare tick where two
+writers actually collide. Postgres deployments never need this (proper
+MVCC). This is also why every test that submits a task waits for it to
+reach a terminal status before returning — an orphaned fire-and-forget
+background session left running past its own test previously caused
+exactly this collision against later tests, sharing the one SQLite file all
+tests in a session use.
+
 ## 12. State & restart
 
 Everything that must survive a restart is a database row, written *before*
@@ -261,11 +396,15 @@ intentionally not glossed over.
 read one.)
 
 1. `ProcessRuntime` does not isolate filesystem visibility or network access
-   — see §6. `ContainerRuntime` addresses this but was not exercised against
-   a live Docker daemon in the environment this repo was built in (no
-   `docker` binary there). Verify it with `docker compose up` plus a
-   `runtime_kind: container` agent on a machine that has Docker before
-   relying on it.
+   — see §6. `ContainerRuntime` addresses this but has not been exercised
+   end-to-end against a live Docker daemon as part of this build (it's
+   written against the documented `docker` SDK API and shares the same
+   protocol/tests-shape as `ProcessRuntime`, but registering a
+   `runtime_kind: container` agent and actually running it has not been
+   verified here). On a machine with Docker available, enable it by
+   uncommenting the `docker.sock` mount in `docker-compose.yml` and register
+   an agent version with `"runtime_kind": "container"` — treat it as
+   untested until you've run a task through it yourself.
 2. An agent that bypasses the SDK/protocol with raw syscalls is not
    intercepted by the policy engine — demonstrated, not hidden, by
    `test_raw_syscall_bypass_is_documented_not_hidden`.
@@ -286,6 +425,17 @@ read one.)
    aiosqlite background thread finishing after the session's last test event
    loop tears down. It does not affect test outcomes (all tests pass either
    way) and does not occur when running individual test files.
+8. Authentication is a static per-role API key (§3b), not an enterprise IAM
+   system — no user table, no password hashing, no token expiry, no
+   authorization-denial audit trail (a `401`/`403` is returned and logged via
+   the process logger, but does not currently write an `AuditEvent` row).
+9. `CLIENT` row-scoping (`Task.created_by`) is best-effort ownership
+   matching on the API key's label, not a real multi-tenancy model, and
+   doesn't extend to agents or policies.
+10. The admin frontend (`frontend/`) has no automated test suite in this
+    build — verified by a successful production build plus manual
+    request/response checks against the live backend for every endpoint it
+    calls, not by an automated browser or component-test harness.
 
 ## 14. Why these technology choices
 
