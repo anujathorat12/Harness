@@ -20,6 +20,13 @@ import pytest_asyncio
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Match harness/core/config.py's dev defaults exactly -- tests don't override
+# these env vars, so `settings.api_key_*` resolves to these values.
+ADMIN_KEY = "dev-admin-key-***CHANGE-ME***"
+OPERATOR_KEY = "dev-operator-key-***CHANGE-ME***"
+AUDITOR_KEY = "dev-auditor-key-***CHANGE-ME***"
+CLIENT_KEY = "dev-client-key-***CHANGE-ME***"
+
 
 def agent_script(*parts: str) -> str:
     return os.path.join(REPO_ROOT, *parts)
@@ -37,15 +44,46 @@ async def _init_db():
     yield
 
 
-@pytest_asyncio.fixture
-async def app_client():
-    """One shared app/DB across the whole test session (see the env-var
-    note above for why); each test uses unique() names so agents/policies
-    from different tests never collide."""
+def _make_client(headers: dict[str, str]):
     import httpx
 
     from harness.main import app
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30) as client:
+    return httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30, headers=headers)
+
+
+@pytest_asyncio.fixture
+async def app_client():
+    """One shared app/DB across the whole test session (see the env-var
+    note above for why); each test uses unique() names so agents/policies
+    from different tests never collide. Defaults to the ADMIN role so every
+    pre-existing test (written before auth existed) keeps passing unchanged;
+    tests that specifically exercise authorization use the role-specific
+    fixtures below instead."""
+    async with _make_client({"X-API-Key": ADMIN_KEY}) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def operator_client():
+    async with _make_client({"X-API-Key": OPERATOR_KEY}) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def auditor_client():
+    async with _make_client({"X-API-Key": AUDITOR_KEY}) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def client_client():
+    async with _make_client({"X-API-Key": CLIENT_KEY}) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def anon_client():
+    async with _make_client({}) as client:
         yield client
